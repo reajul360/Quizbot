@@ -1,7 +1,8 @@
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# Quiz Questions
+# Questions
 questions = [
     {
         "question": "What is the capital of France?",
@@ -45,8 +46,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
         await query.message.reply_text(f"Quiz finished! Your score: {score}/{len(questions)}")
 
-# Your Bot Token
-TOKEN = "8281350439:AAH61nGOiyiaOvmWZ_yKroVeTCavv6BEAA8"
+TOKEN = os.getenv("BOT_TOKEN")
 
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
