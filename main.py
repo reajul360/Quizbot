@@ -55,7 +55,28 @@ def admin_only(func):
 # --- Admin Commands (No changes needed) ---
 @admin_only
 async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = "..." # Same as before
+    help_text = """
+👑 *Admin Command Menu* 👑
+
+1️⃣ `/addquiz <Title>; <TimeLimitMinutes>`
+Reply to a message with questions to add a quiz.
+*Format:* `Question+Opt1,Opt2+CorrectNum`
+
+2️⃣ `/setactive <QuizID>`
+Sets a quiz as the one users can take.
+
+3️⃣ `/updateversion <QuizID>`
+Updates a quiz version, allowing all users to retake it.
+
+4️⃣ `/listquizzes`
+Shows all available quizzes and their IDs.
+
+5️⃣ `/viewscores <QuizID>`
+Shows all scores for a specific quiz.
+
+6️⃣ `/deletequiz <QuizID>`
+Permanently deletes a quiz.
+"""
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 @admin_only
@@ -202,7 +223,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("There is no active quiz at the moment.")
         return
 
-    # Check if user is already in a quiz
     if data.get('user_states', {}).get(user_id):
         await update.message.reply_text("You are already in the middle of a quiz!")
         return
@@ -213,12 +233,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"You have already completed the '{quiz['title']}' quiz.")
         return
 
-    # Initialize user state
     user_state = {
         'quiz_id': active_quiz_id,
         'current_question': 0,
         'score': 0,
-        'name': update.effective_user.first_name
+        'name': update.effective_user.first_name,
+        'last_poll_message_id': None
     }
     if 'user_states' not in data:
         data['user_states'] = {}
@@ -227,18 +247,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"👋 Welcome, {user_state['name']}!\n\nThe quiz '{quiz['title']}' is starting now. Good luck!")
     
-    # Start timer
     time_limit_seconds = quiz["time_limit_minutes"] * 60
     context.job_queue.run_once(quiz_timeout, time_limit_seconds, chat_id=chat_id, user_id=user_id, name=f"quiz_timer_{user_id}")
 
     await send_poll_question(context, user_id=user_id, chat_id=chat_id)
 
 async def send_poll_question(context: ContextTypes.DEFAULT_TYPE, user_id: str, chat_id: int):
-    """Sends the current question as a poll."""
+    """Sends the current question as a regular poll."""
     data = load_data()
     user_state = data.get('user_states', {}).get(user_id)
     if not user_state:
-        return # Quiz ended or state lost
+        return
 
     quiz_id = user_state['quiz_id']
     q_index = user_state['current_question']
@@ -248,30 +267,33 @@ async def send_poll_question(context: ContextTypes.DEFAULT_TYPE, user_id: str, c
         await end_quiz(context, user_id, chat_id)
         return
 
+    # Stop the previous poll to prevent user from changing answer
+    if user_state.get('last_poll_message_id'):
+        try:
+            await context.bot.stop_poll(chat_id, user_state['last_poll_message_id'])
+        except Exception as e:
+            logger.warning(f"Could not stop poll: {e}")
+
     question_data = quiz['questions'][q_index]
     
+    # *** CHANGE: Use "regular" poll type and remove correct_option_id ***
     message = await context.bot.send_poll(
         chat_id=chat_id,
         question=f"Question {q_index + 1}/{len(quiz['questions'])}: {question_data['question']}",
         options=question_data['options'],
-        type="quiz",
-        correct_option_id=question_data['correct_option_index'],
-        is_anonymous=False, # Must be False for quiz mode
+        type="regular", # This prevents immediate feedback
+        is_anonymous=False,
     )
     
-    # Save poll_id to link it to the user
-    context.bot_data.setdefault(message.poll.id, {})['user_id'] = user_id
+    # Save the new poll's message_id
+    user_state['last_poll_message_id'] = message.message_id
+    data['user_states'][user_id] = user_state
+    save_data(data)
 
 async def receive_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles a user's answer to a poll."""
-    poll_id = update.poll_answer.poll_id
+    """Handles a user's answer to a regular poll."""
     user_id = str(update.poll_answer.user.id)
     
-    # Check if the poll belongs to an active quiz for this user
-    bot_poll_data = context.bot_data.get(poll_id)
-    if not bot_poll_data or bot_poll_data.get('user_id') != user_id:
-        return
-
     data = load_data()
     user_state = data.get('user_states', {}).get(user_id)
     if not user_state:
@@ -281,6 +303,10 @@ async def receive_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE
     q_index = user_state['current_question']
     quiz = data['quizzes'][quiz_id]
     
+    # Check if the answer is for the current question
+    if q_index >= len(quiz['questions']):
+        return
+
     correct_option_id = quiz['questions'][q_index]['correct_option_index']
     
     if update.poll_answer.option_ids and update.poll_answer.option_ids[0] == correct_option_id:
@@ -298,18 +324,23 @@ async def end_quiz(context: ContextTypes.DEFAULT_TYPE, user_id: str, chat_id: in
     if not user_state:
         return
 
-    # Remove timer job
     jobs = context.job_queue.get_jobs_by_name(f"quiz_timer_{user_id}")
     for job in jobs:
         job.schedule_removal()
     
+    # Stop the very last poll
+    if user_state.get('last_poll_message_id'):
+        try:
+            await context.bot.stop_poll(chat_id, user_state['last_poll_message_id'])
+        except Exception as e:
+            logger.warning(f"Could not stop final poll: {e}")
+
     quiz_id = user_state['quiz_id']
     quiz_data = data['quizzes'][quiz_id]
     score = user_state['score']
     total = len(quiz_data['questions'])
     name = user_state['name']
 
-    # Save score
     if 'user_scores' not in data:
         data['user_scores'] = {}
     if user_id not in data['user_scores']:
@@ -323,7 +354,6 @@ async def end_quiz(context: ContextTypes.DEFAULT_TYPE, user_id: str, chat_id: in
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
     
-    # Clean up user state
     del data['user_states'][user_id]
     save_data(data)
 
@@ -343,11 +373,9 @@ def main() -> None:
 
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # User handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(PollAnswerHandler(receive_poll_answer))
     
-    # Admin handlers (add them back)
     application.add_handler(CommandHandler("admin", admin_help_command))
     application.add_handler(CommandHandler("addquiz", add_quiz_command))
     application.add_handler(CommandHandler("listquizzes", list_quizzes_command))
@@ -356,7 +384,7 @@ def main() -> None:
     application.add_handler(CommandHandler("viewscores", view_scores_command))
     application.add_handler(CommandHandler("deletequiz", delete_quiz_command))
 
-    print("Bot is running with Telegram Poll quiz mode...")
+    print("Bot is running with REGULAR Poll quiz mode (no answer reveal)...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
