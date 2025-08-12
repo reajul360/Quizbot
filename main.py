@@ -95,7 +95,7 @@ async def add_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ **Invalid Format!** Use: `/addquiz <Title>; <TimeLimitMinutes>`", parse_mode=ParseMode.MARKDOWN)
         return
     questions_text = update.message.reply_to_message.text
-    lines = questions_text.strip().split('\n')
+    lines = questions_text.strip().split(';')
     new_questions = []
     for i, line in enumerate(lines):
         try:
